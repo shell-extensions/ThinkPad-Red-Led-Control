@@ -31,7 +31,7 @@ This extension is available on [GNOME Extensions Website](https://extensions.gno
 
 ## TODOs
 - [x] **Give support to other Gnome Versions**: Give support to GNOME 47, 48
-- [ ] **Support for Uppercase and Special Characters in Morse Code**: Currently, only lowercase letters and numbers are supported for Morse code. Uppercase letters and special characters need to be handled.
+- [x] **Support for Uppercase and Special Characters in Morse Code**: Currently, only lowercase letters and numbers are supported for Morse code. Uppercase letters and special characters need to be handled.
 - [ ] **Add Persistence**: Resolve issues related with the state resetting after a reboot.
 - [ ] **Add more languages**: Only english is supported righ now.
 - [ ] **Interface to Control Morse Code Blinking Speed**: Implement a user interface to allow users to customize the speed of the Morse code blinking.

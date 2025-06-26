@@ -180,7 +180,7 @@ class LedControlMenu extends QuickSettings.QuickMenuToggle {
 
         let contentLayout = dialog.contentLayout;
 
-        let label = new St.Label({ text: 'Enter the text to emit in Morse (0-9a-z):' });
+        let label = new St.Label({ text: 'Enter the text to emit in Morse (0-9, a-z, A-Z):' });
         contentLayout.add_child(label);
     
         let entry = new St.Entry({ name: 'text-entry' });
@@ -225,7 +225,8 @@ class LedControlMenu extends QuickSettings.QuickMenuToggle {
                     }
         
                     morse() {
-                        case "$1" in
+                        char=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+                        case "$char" in
                             "0") dah; dah; dah; dah; dah;;
                             "1") dit; dah; dah; dah; dah;;
                             "2") dit; dit; dah; dah; dah;;
