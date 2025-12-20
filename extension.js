@@ -3,6 +3,7 @@ import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import St from 'gi://St';
 import Clutter from 'gi://Clutter';
+import Pango from 'gi://Pango';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
@@ -10,9 +11,12 @@ import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 
 import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-const OFF_COMAND = "modprobe -r ec_sys && modprobe ec_sys write_support=1 && printf '\\x0a' | dd of=/sys/kernel/debug/ec/ec0/io bs=1 seek=12 count=1 conv=notrunc";
-const ON_COMAND = "modprobe -r ec_sys && modprobe ec_sys write_support=1 && printf '\\x8a' | dd of=/sys/kernel/debug/ec/ec0/io bs=1 seek=12 count=1 conv=notrunc";
-const BLINK_COMAND = "modprobe -r ec_sys && modprobe ec_sys write_support=1 && printf '\\xca' | dd of=/sys/kernel/debug/ec/ec0/io bs=1 seek=12 count=1 conv=notrunc";
+const HELPER_INSTALL_PATH = "/usr/local/bin/thinkpad-red-led-helper";
+const SUDOERS_FILE = "/etc/sudoers.d/thinkpad-red-led";
+const LOCKDOWN_STATUS_PATH = "/sys/kernel/security/lockdown";
+const STATE_FILE_PATH = "/var/lib/thinkpad-red-led/state";
+const MORSE_ALLOWED_RE = /^[0-9a-z ]+$/i;
+const TEXT_DECODER = new TextDecoder('utf-8');
 
 
 const LedControlMenu = GObject.registerClass(
@@ -36,9 +40,9 @@ class LedControlMenu extends QuickSettings.QuickMenuToggle {
         this.menu.setHeader('keyboard-brightness-high-symbolic', _('ThinkPad Red Led Control'), _(''));
         this._itemsSection = new PopupMenu.PopupMenuSection();
         this._menuItems = [
-            { label: _('  Led Off  '), icon: 'keyboard-brightness-off-symbolic', command: OFF_COMAND },
-            { label: _('  Led On  '), icon: 'keyboard-brightness-high-symbolic', command: ON_COMAND },
-            { label: _('  Led Blinking  '), icon: 'keyboard-brightness-medium-symbolic', command: BLINK_COMAND },
+            { label: _('  Led Off  '), icon: 'keyboard-brightness-off-symbolic', action: 'off' },
+            { label: _('  Led On  '), icon: 'keyboard-brightness-high-symbolic', action: 'on' },
+            { label: _('  Led Blinking  '), icon: 'keyboard-brightness-medium-symbolic', action: 'blink' },
         ];
 
         this._menuItems.forEach((item, index) => {
@@ -54,21 +58,16 @@ class LedControlMenu extends QuickSettings.QuickMenuToggle {
             menuItem.actor.add_child(box);
 
             menuItem.connect('activate', () => {
-                this._runCommand([ 
-                    "pkexec",
-                    "bash",
-                    "-c",
-                    `${item.command}`
-                ]).then(() => {
-                        menuItem._tick.visible = true;
-                        this._updateCheckState(index);
-                        this.iconName = item.icon;
-                        this.menu.setHeader(item.icon, _('ThinkPad Red Led Control'), _(''));
-                        this._indicator.icon_name = item.icon;
-                    
+                const previousIndex = this._currentCheckedIndex;
+                this._setPendingState(item.icon, _('Applying...'));
+                this._runHelperCommand([item.action]).then(() => {
+                        this._setState(index, item.icon, item.label.trim(), menuItem);
                 }).catch((error) => {
-                    Main.notify(_('Error'), _('Could not run the command. Check your credentials.'));
+                    if (!error?.handled) {
+                        Main.notify(_('Error'), _('Could not run the command.'));
+                    }
                     console.error('Error running the command:', error);
+                    this._setState(previousIndex, this._menuItems[previousIndex].icon, this._menuItems[previousIndex].label.trim());
                 });
             });
             
@@ -79,12 +78,13 @@ class LedControlMenu extends QuickSettings.QuickMenuToggle {
 
         // Add a separator and settings action
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        const settingsItem = this.menu.addAction(_('Morse Message'), () => this._openMorseDialog());
-        settingsItem.visible = Main.sessionMode.allowSettings;
+        const setupItem = this.menu.addAction(_('Setup Helper'), () => this._openSetupDialog());
+        setupItem.visible = Main.sessionMode.allowSettings;
+        const morseItem = this.menu.addAction(_('Morse Message'), () => this._openMorseDialog());
+        morseItem.visible = Main.sessionMode.allowSettings;
         
-        // Would like to read the current state of the led, but it's not possible without root permissions
         this._currentCheckedIndex = 1;
-        this._updateCheckState(this._currentCheckedIndex);
+        this._applySavedState();
     }
 
     /**
@@ -119,7 +119,7 @@ class LedControlMenu extends QuickSettings.QuickMenuToggle {
                     stream.read_line_async(GLib.PRIORITY_DEFAULT, null, (source, res) => {
                         let [line, length] = source.read_line_finish(res);
                         if (line) {
-                            let text = ByteArray.toString(line);
+                            let text = TEXT_DECODER.decode(line);
                             callback(text);
                             readStream(stream, callback);
                         }
@@ -131,14 +131,18 @@ class LedControlMenu extends QuickSettings.QuickMenuToggle {
 
                 // Monitor the command's exit status
                 GLib.child_watch_add(GLib.PRIORITY_DEFAULT, pid, (pid, status) => {
-                    if (GLib.spawn_check_exit_status(status)) {
-                        if (errorOutput.includes("Error executing command as another user: Request dismissed")) {
-                            reject(new Error("User cancelled the authentication."));
+                    try {
+                        if (GLib.spawn_check_exit_status(status)) {
+                            if (errorOutput.includes("Error executing command as another user: Request dismissed")) {
+                                reject(new Error("User cancelled the authentication."));
+                            } else {
+                                resolve();
+                            }
                         } else {
-                            resolve();
+                            reject(new Error(`Command failed with status ${status}\n${errorOutput}`));
                         }
-                    } else {
-                        reject(new Error(`Command failed with status ${status}\n${errorOutput}`));
+                    } catch (err) {
+                        reject(err);
                     }
                 });
 
@@ -147,6 +151,117 @@ class LedControlMenu extends QuickSettings.QuickMenuToggle {
                 reject(error);
             }
         });
+    }
+
+    _notifySetupRequired() {
+        Main.notify(_('Setup required'), _('Open "Setup Helper" and follow the steps to allow passwordless access.'));
+    }
+
+    _isAuthError(error) {
+        const message = (error?.message || '').toLowerCase();
+        return message.includes('sudo') && (
+            message.includes('password') ||
+            message.includes('not allowed') ||
+            message.includes('permission denied') ||
+            message.includes('no tty') ||
+            message.includes('authentication')
+        );
+    }
+
+    _getKernelLockdownMode() {
+        try {
+            if (!GLib.file_test(LOCKDOWN_STATUS_PATH, GLib.FileTest.IS_REGULAR)) {
+                return null;
+            }
+            const [ok, contents] = GLib.file_get_contents(LOCKDOWN_STATUS_PATH);
+            if (!ok || contents === null) {
+                return null;
+            }
+            const text = TEXT_DECODER.decode(contents).trim();
+            const match = text.match(/\[(\w+)\]/);
+            if (!match) {
+                return null;
+            }
+            const mode = match[1].toLowerCase();
+            return mode === 'none' ? null : mode;
+        } catch (error) {
+            console.error('Error reading kernel lockdown status:', error);
+            return null;
+        }
+    }
+
+    _maybeNotifyLockdown() {
+        const mode = this._getKernelLockdownMode();
+        if (!mode) {
+            return false;
+        }
+        Main.notify(
+            _('Secure Boot / kernel lockdown'),
+            _('Kernel lockdown is active (often due to Secure Boot). It blocks ec_sys write support, so the LED cannot be controlled. Disable Secure Boot or boot with lockdown=none.')
+        );
+        return true;
+    }
+
+    _runHelperCommand(args) {
+        const sudoBin = GLib.find_program_in_path('sudo');
+        if (!sudoBin) {
+            Main.notify(_('Error'), _('sudo was not found on this system.'));
+            const error = new Error('sudo not found');
+            error.handled = true;
+            return Promise.reject(error);
+        }
+
+        if (!GLib.file_test(HELPER_INSTALL_PATH, GLib.FileTest.IS_EXECUTABLE)) {
+            this._notifySetupRequired();
+            this._openSetupDialog();
+            const error = new Error('helper not installed');
+            error.handled = true;
+            return Promise.reject(error);
+        }
+
+        return this._runCommand([sudoBin, '-n', HELPER_INSTALL_PATH, ...args]).catch((error) => {
+            if (this._isAuthError(error)) {
+                this._notifySetupRequired();
+                this._openSetupDialog();
+                error.handled = true;
+            } else if (this._maybeNotifyLockdown()) {
+                error.handled = true;
+            }
+            return Promise.reject(error);
+        });
+    }
+
+    _readSavedState() {
+        try {
+            if (!GLib.file_test(STATE_FILE_PATH, GLib.FileTest.IS_REGULAR)) {
+                return null;
+            }
+            const [ok, contents] = GLib.file_get_contents(STATE_FILE_PATH);
+            if (!ok || contents === null) {
+                return null;
+            }
+            const state = TEXT_DECODER.decode(contents).trim().toLowerCase();
+            return state || null;
+        } catch (error) {
+            console.error('Error reading LED state file:', error);
+            return null;
+        }
+    }
+
+    _applySavedState() {
+        const state = this._readSavedState();
+        let index = null;
+        if (state === 'off') index = 0;
+        if (state === 'on') index = 1;
+        if (state === 'blink') index = 2;
+
+        if (index === null) {
+            this._updateCheckState(this._currentCheckedIndex);
+            return;
+        }
+
+        const item = this._menuItems[index];
+        this._setState(index, item.icon, item.label.trim());
     }
 
 
@@ -164,13 +279,80 @@ class LedControlMenu extends QuickSettings.QuickMenuToggle {
         if (this._currentCheckedIndex === 2) super.subtitle = _('Led Blinking');
     }
 
+    _setState(index, iconName, label, menuItem = null) {
+        this._updateCheckState(index);
+        this.iconName = iconName;
+        this.menu.setHeader(iconName, _('ThinkPad Red Led Control'), _(''));
+        this._indicator.icon_name = iconName;
+        super.subtitle = label;
+        if (menuItem) {
+            menuItem._tick.visible = true;
+        }
+    }
+
+    _setPendingState(iconName, subtitle) {
+        this.iconName = iconName;
+        this.menu.setHeader(iconName, _('ThinkPad Red Led Control'), _(''));
+        this._indicator.icon_name = iconName;
+        super.subtitle = subtitle;
+    }
+
+    _openSetupDialog() {
+        const instructions = [
+            _('This extension needs root access to control the ThinkPad LED.'),
+            _('Quick setup (recommended):'),
+            _('Installs helper, sudoers, and the systemd restore service.'),
+            'bash $HOME/.local/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/install.sh',
+            '',
+            _('Manual setup:'),
+            'EXT_SRC="$HOME/.local/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/tools/thinkpad-red-led-helper"',
+            `sudo install -o root -g root -m 0755 "$EXT_SRC" ${HELPER_INSTALL_PATH}`,
+            `sudo visudo -f ${SUDOERS_FILE}`,
+            _('Add this line (replace with your username):'),
+            `your_user ALL=(root) NOPASSWD: ${HELPER_INSTALL_PATH}`,
+            '',
+            _('Systemd service (boot restore):'),
+            'SERVICE_SRC="$HOME/.local/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/tools/thinkpad-red-led-restore.service"',
+            'sudo install -o root -g root -m 0644 "$SERVICE_SRC" /etc/systemd/system/thinkpad-red-led-restore.service',
+            'sudo systemctl daemon-reload',
+            'sudo systemctl enable thinkpad-red-led-restore.service',
+            '',
+            _('If the extension is installed system-wide, use:'),
+            'EXT_SRC="/usr/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/tools/thinkpad-red-led-helper"',
+            'SERVICE_SRC="/usr/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/tools/thinkpad-red-led-restore.service"',
+            _('Then restart GNOME Shell or disable/enable the extension.'),
+        ].join('\n');
+
+        let dialog = new ModalDialog.ModalDialog({
+            destroyOnClose: true,
+            styleClass: 'my-dialog',
+        });
+
+        let label = new St.Label({
+            text: instructions,
+            x_align: Clutter.ActorAlign.START,
+        });
+        label.clutter_text.line_wrap = true;
+        label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+        dialog.contentLayout.add_child(label);
+
+        dialog.addButton({
+            label: _('Close'),
+            action: () => {
+                dialog.close(global.get_current_time());
+            },
+        });
+
+        dialog.open(global.get_current_time());
+    }
+
 
     /**
      * Opens a dialog window that allows the user to input text which will be converted to Morse code 
      * and used to control the LED in a Morse code pattern.
      * 
-     * The user can input text and upon clicking "Accept", the text is converted into a set of shell 
-     * commands that control the LED's on/off state to blink in Morse code.
+     * The user can input text and upon clicking "Accept", the text is sent to the privileged helper
+     * which drives the LED on/off state to blink in Morse code.
      */
     _openMorseDialog() {
         let dialog = new ModalDialog.ModalDialog({
@@ -180,145 +362,49 @@ class LedControlMenu extends QuickSettings.QuickMenuToggle {
 
         let contentLayout = dialog.contentLayout;
 
-        let label = new St.Label({ text: 'Enter the text to emit in Morse (0-9, a-z, A-Z):' });
+        let label = new St.Label({ text: _('Enter the text to emit in Morse (0-9, a-z, space):') });
         contentLayout.add_child(label);
     
         let entry = new St.Entry({ name: 'text-entry' });
         contentLayout.add_child(entry);
     
         dialog.addButton({
-            label: 'Cancel',
+            label: _('Cancel'),
             action: () => {
                 dialog.close(global.get_current_time()); 
             },
         });
     
         dialog.addButton({
-            label: 'Accept',
+            label: _('Accept'),
             action: () => {
                 dialog.close(global.get_current_time());
-                const morseText = entry.get_text(); 
-                log('Texto en Morse:', morseText);
-        
-                const morseCommands1 = `
-                    modprobe -r ec_sys;
-                    modprobe ec_sys write_support=1;
-                    on='\\x8a';
-                    off='\\x0a';
-        
-                    led() {
-                        echo -n -e "$1" | dd of="/sys/kernel/debug/ec/ec0/io" bs=1 seek=12 count=1 conv=notrunc 2> /dev/null
-                    }
-        
-                    dit() {
-                        led $on;
-                        sleep 0.3;
-                        led $off;
-                        sleep 0.15;
-                    }
-        
-                    dah() {
-                        led $on;
-                        sleep 0.8;
-                        led $off;
-                        sleep 0.15;
-                    }
-        
-                    morse() {
-                        char=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-                        case "$char" in
-                            "0") dah; dah; dah; dah; dah;;
-                            "1") dit; dah; dah; dah; dah;;
-                            "2") dit; dit; dah; dah; dah;;
-                            "3") dit; dit; dit; dah; dah;;
-                            "4") dit; dit; dit; dit; dah;;
-                            "5") dit; dit; dit; dit; dit;;
-                            "6") dah; dit; dit; dit; dit;;
-                            "7") dah; dah; dit; dit; dit;;
-                            "8") dah; dah; dah; dit; dit;;
-                            "9") dah; dah; dah; dah; dit;;
-                            "a") dit; dah;;
-                            "b") dah; dit; dit; dit;;
-                            "c") dah; dit; dah; dit;;
-                            "d") dah; dit; dit;;
-                            "e") dit;;
-                            "f") dit; dit; dah; dit;;
-                            "g") dah; dah; dit;;
-                            "h") dit; dit; dit; dit;;
-                            "i") dit; dit;;
-                            "j") dit; dah; dah; dah;;
-                            "k") dah; dit; dah;;
-                            "l") dit; dah; dit; dit;;
-                            "m") dah; dah;;
-                            "n") dah; dit;;
-                            "o") dah; dah; dah;;
-                            "p") dit; dah; dah; dit;;
-                            "q") dah; dah; dit; dah;;
-                            "r") dit; dah; dit;;
-                            "s") dit; dit; dit;;
-                            "t") dah;;
-                            "u") dit; dit; dah;;
-                            "v") dit; dit; dit; dah;;
-                            "w") dit; dah; dah;;
-                            "x") dah; dit; dit; dah;;
-                            "y") dah; dit; dah; dah;;
-                            "z") dah; dah; dit; dit;;
-                            " ") sleep 0.6;;
-                        esac
-                        sleep 0.2;
-                    }
-        
-                     parse() {
-                        tmp="\${1}";
-                        for i in \$(seq 0 \${#tmp}); do
-                            echo "current letter: \${tmp:\$i:1}";
-                            morse \${tmp:\$i:1};
-                        done;
-                    }
+                const rawText = entry.get_text();
+                const morseText = rawText.trim().toLowerCase();
 
-                    led \$off;
-                    parse "
-                `;
-                const morseCommands2 = `";
-                    sleep 1;
-                    led \$on;
-                    modprobe -r ec_sys;`
+                if (!morseText) {
+                    Main.notify(_('Error'), _('Please enter a message.'));
+                    return;
+                }
 
-                const morseCommands = morseCommands1 + morseText + morseCommands2;
-        
-                return new Promise((resolve, reject) => {
-                    try {
-                        this._updateCheckState(0);
-                        this.iconName = 'keyboard-brightness-medium-symbolic';
-                        this.menu.setHeader('keyboard-brightness-medium-symbolic', _('ThinkPad Red Led Control'), _(''));
-                        this._indicator.icon_name = 'keyboard-brightness-medium-symbolic';
-                        this.subtitle = 'Morsing...  ';
+                if (!MORSE_ALLOWED_RE.test(morseText)) {
+                    Main.notify(_('Error'), _('Only 0-9, a-z, and space are supported.'));
+                    return;
+                }
 
-                        this._runCommand([
-                            "pkexec",
-                            "bash",
-                            "-c",
-                            morseCommands
-                        ]).then(() => {
-                            this._updateCheckState(1);
-                            this.iconName = 'keyboard-brightness-high-symbolic';
-                            this.menu.setHeader('keyboard-brightness-high-symbolic', _('ThinkPad Red Led Control'), _(''));
-                            this._indicator.icon_name = 'keyboard-brightness-high-symbolic';
-                            resolve(); 
-                        
-                        }).catch((error) => {
-                            Main.notify(_('Error'), _('Could not run the command. Check your credentials.'));
-                            console.error('Error running the command:', error);
-                        });
+                const previousIndex = this._currentCheckedIndex;
+                const previousIcon = this.iconName;
+                this._setPendingState('keyboard-brightness-medium-symbolic', _('Morsing...'));
 
-                    } catch (error) {
-                        console.error('Error running the command:', error);
-                        reject(error);
-                    }
-                }).then(() => {
-                    dialog.close(global.get_current_time());
+                this._runHelperCommand(['morse', morseText]).then(() => {
+                    this._setState(1, 'keyboard-brightness-high-symbolic', _('Led On'));
                 }).catch((error) => {
+                    if (!error?.handled) {
+                        Main.notify(_('Error'), _('Could not run the command.'));
+                    }
                     console.error('Error running the command:', error);
+                    const fallbackLabel = this._menuItems[previousIndex]?.label?.trim?.() || _('Led On');
+                    this._setState(previousIndex, previousIcon, fallbackLabel);
                 });
             },
         });
@@ -373,6 +459,3 @@ export default class LedControlExtension extends Extension {
     }
 }
     
-
-
-
