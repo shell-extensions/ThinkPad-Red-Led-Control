@@ -1,0 +1,13 @@
+[Unit]
+Description=Restore ThinkPad red LED state
+After=systemd-modules-load.service
+RequiresMountsFor=/sys/kernel/debug
+ConditionPathExists=/usr/local/bin/thinkpad-red-led-helper
+ConditionPathExists=/var/lib/thinkpad-red-led/state
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/thinkpad-red-led-helper restore
+
+[Install]
+WantedBy=multi-user.target
