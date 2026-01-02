@@ -327,43 +327,106 @@ class LedControlMenu extends QuickSettings.QuickMenuToggle {
     }
 
     _openSetupDialog() {
-        const instructions = [
-            _('This extension needs root access to control the ThinkPad LED.'),
-            _('Quick setup (recommended):'),
-            _('Installs helper, sudoers, and the systemd restore service.'),
-            'bash $HOME/.local/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/install.sh',
-            '',
-            _('Manual setup:'),
-            'EXT_SRC="$HOME/.local/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/tools/thinkpad-red-led-helper"',
-            `sudo install -o root -g root -m 0755 "$EXT_SRC" ${HELPER_INSTALL_PATH}`,
-            `sudo visudo -f ${SUDOERS_FILE}`,
-            _('Add this line (replace with your username):'),
-            `your_user ALL=(root) NOPASSWD: ${HELPER_INSTALL_PATH}`,
-            '',
-            _('Systemd service (boot restore):'),
-            'SERVICE_SRC="$HOME/.local/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/tools/thinkpad-red-led-restore.service"',
-            'sudo install -o root -g root -m 0644 "$SERVICE_SRC" /etc/systemd/system/thinkpad-red-led-restore.service',
-            'sudo systemctl daemon-reload',
-            'sudo systemctl enable thinkpad-red-led-restore.service',
-            '',
-            _('If the extension is installed system-wide, use:'),
-            'EXT_SRC="/usr/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/tools/thinkpad-red-led-helper"',
-            'SERVICE_SRC="/usr/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/tools/thinkpad-red-led-restore.service"',
-            _('Then restart GNOME Shell or disable/enable the extension.'),
-        ].join('\n');
+        const STYLE_TITLE = 'font-weight: bold; font-size: 1.1em; margin-bottom: 8px;';
+        const STYLE_SECTION = 'font-weight: bold; margin-top: 12px; margin-bottom: 4px; color: #3584e4;';
+        const STYLE_TEXT = 'margin-bottom: 4px;';
+        const STYLE_CODE_BOX = 'background-color: rgba(0,0,0,0.15); border-radius: 4px; padding: 6px 8px; margin: 2px 0;';
+        const STYLE_CODE_LABEL = 'font-family: monospace;';
+        const STYLE_COPY_BTN = 'padding: 2px 6px; margin-left: 8px;';
+        const STYLE_NOTE = 'font-style: italic; color: #888; margin-top: 8px;';
 
         let dialog = new ModalDialog.ModalDialog({
             destroyOnClose: true,
             styleClass: 'my-dialog',
         });
 
-        let label = new St.Label({
-            text: instructions,
-            x_align: Clutter.ActorAlign.START,
+        // Make dialog wider for better readability
+        dialog.contentLayout.style = 'min-width: 850px;';
+
+        let box = new St.BoxLayout({
+            vertical: true,
+            x_expand: true,
+            style: 'spacing: 2px;',
         });
-        label.clutter_text.line_wrap = true;
-        label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
-        dialog.contentLayout.add_child(label);
+
+        const addLabel = (text, style) => {
+            let label = new St.Label({ text, x_align: Clutter.ActorAlign.START, style });
+            label.clutter_text.line_wrap = true;
+            label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+            box.add_child(label);
+        };
+
+        const addCode = (text) => {
+            let codeBox = new St.BoxLayout({
+                vertical: false,
+                x_expand: true,
+                style: STYLE_CODE_BOX,
+            });
+
+            let label = new St.Label({
+                text,
+                x_align: Clutter.ActorAlign.START,
+                x_expand: true,
+                style: STYLE_CODE_LABEL,
+            });
+            label.clutter_text.line_wrap = true;
+            label.clutter_text.line_wrap_mode = Pango.WrapMode.CHAR;
+            label.clutter_text.selectable = true;
+            codeBox.add_child(label);
+
+            let copyBtn = new St.Button({
+                style_class: 'button',
+                style: STYLE_COPY_BTN,
+                child: new St.Icon({
+                    icon_name: 'edit-copy-symbolic',
+                    icon_size: 14,
+                }),
+            });
+            copyBtn.connect('clicked', () => {
+                St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, text);
+                // Visual feedback: change icon temporarily
+                copyBtn.child.icon_name = 'emblem-ok-symbolic';
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+                    copyBtn.child.icon_name = 'edit-copy-symbolic';
+                    return GLib.SOURCE_REMOVE;
+                });
+            });
+            codeBox.add_child(copyBtn);
+
+            box.add_child(codeBox);
+        };
+
+        // Title
+        addLabel(_('This extension needs root access to control the ThinkPad LED.'), STYLE_TITLE);
+
+        // Quick setup
+        addLabel(_('Quick setup (recommended)'), STYLE_SECTION);
+        addLabel(_('Installs helper, sudoers, and the systemd restore service.'), STYLE_TEXT);
+        addCode('bash $HOME/.local/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/install.sh');
+
+        // Manual setup
+        addLabel(_('Manual setup'), STYLE_SECTION);
+        addCode('EXT_SRC="$HOME/.local/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/tools/thinkpad-red-led-helper"');
+        addCode(`sudo install -o root -g root -m 0755 "$EXT_SRC" ${HELPER_INSTALL_PATH}`);
+        addCode(`sudo visudo -f ${SUDOERS_FILE}`);
+        addLabel(_('Add this line (replace with your username):'), STYLE_TEXT);
+        addCode(`your_user ALL=(root) NOPASSWD: ${HELPER_INSTALL_PATH}`);
+
+        // Systemd service
+        addLabel(_('Systemd service (boot restore)'), STYLE_SECTION);
+        addCode('SERVICE_SRC="$HOME/.local/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/tools/thinkpad-red-led-restore.service"');
+        addCode('sudo install -o root -g root -m 0644 "$SERVICE_SRC" /etc/systemd/system/thinkpad-red-led-restore.service');
+        addCode('sudo systemctl daemon-reload');
+        addCode('sudo systemctl enable thinkpad-red-led-restore.service');
+
+        // System-wide note
+        addLabel(_('If the extension is installed system-wide, use:'), STYLE_SECTION);
+        addCode('EXT_SRC="/usr/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/tools/thinkpad-red-led-helper"');
+        addCode('SERVICE_SRC="/usr/share/gnome-shell/extensions/thinkpad-red-led@juanmagd.dev/tools/thinkpad-red-led-restore.service"');
+
+        addLabel(_('Then restart GNOME Shell or disable/enable the extension.'), STYLE_NOTE);
+
+        dialog.contentLayout.add_child(box);
 
         dialog.addButton({
             label: _('Close'),
@@ -488,3 +551,4 @@ export default class LedControlExtension extends Extension {
     }
 }
     
+
